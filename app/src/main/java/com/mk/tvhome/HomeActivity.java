@@ -3,11 +3,13 @@ package com.mk.tvhome;
 import android.animation.ObjectAnimator;
 import android.animation.PropertyValuesHolder;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
@@ -16,11 +18,14 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.TextUtils;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -30,6 +35,7 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -37,6 +43,7 @@ import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
@@ -52,50 +59,58 @@ public class HomeActivity extends Activity {
     private static class AppItem {
         String pkg;
         String label;
+        String cat;
         Intent launch;
         ResolveInfo ri;
     }
 
-    private static final long WALL_INTERVAL_MS = 120000L;
+    private interface IntCb { void on(int i); }
+
+    private static final String NAME = "MK";
+    private static final String[] ROWS = {"Favorites", "Streaming", "Apps", "Games", "Tools"};
+    private static final String[] MOVE_TO = {"Streaming", "Apps", "Games", "Tools"};
+    private static final int[] ACCENTS = {0xFFFFFFFF, 0xFF5AC8FA, 0xFF34D399, 0xFFFBBF24, 0xFFFB7185, 0xFFA78BFA};
+    private static final String[] ACCENT_NAMES = {"White", "Sky", "Mint", "Amber", "Rose", "Violet"};
+    private static final String[] SIZE_NAMES = {"Small", "Medium", "Large"};
+    private static final int[] SIZE_W = {170, 210, 260};
+    private static final int[] SIZE_H = {96, 118, 146};
+    private static final int[] WALL_MIN = {0, 1, 2, 5, 10};
+    private static final String[] WALL_NAMES = {"Off", "1 min", "2 min", "5 min", "10 min"};
+    private static final String[] STREAM_KEYS = {"netflix", "hotstar", "amazonvideo", "sonyliv", "youtube",
+            "airtel", "jio", "discovery", "crunchyroll", "shemaroo", "hungama", "eros", "docubay", "zee5",
+            "voot", "mxplayer", "plex", "anilab", "bookmyshow", "mobiotics", "netmirror", "hdhub", "tachiyomi",
+            "playfy", "bluesun", "aha"};
+    private static final String[] TOOL_KEYS = {"settings", "nextapp", "aptoide", "mouse", "sendfiles",
+            "mediaexplorer", "gallery", "tvmanager", "handbook", "filemanager", "packageinstaller"};
 
     private FrameLayout root;
     private ImageView bgA, bgB;
     private boolean showingA = true;
-    private TextView clock, dateView;
-    private LinearLayout row;
-    private HorizontalScrollView scroll;
+    private TextView clock, dateView, greeting;
+    private LinearLayout rowsHost, pills;
+    private ScrollView vscroll;
+    private View firstTile;
+    private GradientDrawable shadeDrawable;
+    private final ObjectAnimator[] zooms = new ObjectAnimator[2];
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<File> walls = new ArrayList<File>();
     private int wallIdx = 0;
     private SharedPreferences prefs;
     private float density;
+    private int screenH;
     private boolean receiverOn = false;
-    private static final String NAME = "MK";
-    private Typeface fLight, fReg, fMed, fSemi;
-    private TextView greeting;
-    private GradientDrawable shadeDrawable;
-    private final ObjectAnimator[] zooms = new ObjectAnimator[2];
     private boolean animateNext = true;
-
-    private Typeface font(String file, Typeface fallback) {
-        try { return Typeface.createFromAsset(getAssets(), "fonts/" + file); }
-        catch (Throwable t) { return fallback; }
-    }
-
-    private String greetText() {
-        int h = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
-        String g = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 21 ? "Good evening" : "Good night";
-        return g + ", " + NAME;
-    }
+    private Typeface fLight, fReg, fMed, fSemi;
 
     private final BroadcastReceiver pkgReceiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context c, Intent i) { buildRow(); }
+        @Override public void onReceive(Context c, Intent i) { buildAll(); }
     };
 
     private final Runnable clockRun = new Runnable() {
         @Override public void run() {
             Date now = new Date();
-            clock.setText(new SimpleDateFormat("hh:mm a", Locale.getDefault()).format(now));
+            boolean h24 = prefs.getBoolean("clock24", false);
+            clock.setText(new SimpleDateFormat(h24 ? "HH:mm" : "hh:mm a", Locale.getDefault()).format(now));
             dateView.setText(new SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now));
             handler.postDelayed(this, 20000L);
         }
@@ -103,22 +118,42 @@ public class HomeActivity extends Activity {
 
     private final Runnable wallRun = new Runnable() {
         @Override public void run() {
-            if (walls.size() > 1) {
+            if (walls.size() > 1 && wallMs() > 0) {
                 wallIdx = (wallIdx + 1) % walls.size();
                 showWall();
-                handler.postDelayed(this, WALL_INTERVAL_MS);
+                handler.postDelayed(this, wallMs());
             }
         }
     };
 
     private int dp(int v) { return (int) (v * density + 0.5f); }
+    private int accent() { return ACCENTS[prefs.getInt("accent", 0)]; }
+    private long wallMs() { return WALL_MIN[prefs.getInt("wallmin", 2)] * 60000L; }
+
+    private Set<String> getSet(String k) {
+        return new HashSet<String>(prefs.getStringSet(k, new HashSet<String>()));
+    }
+
+    private Typeface font(String file, Typeface fallback) {
+        try { return Typeface.createFromAsset(getAssets(), "fonts/" + file); }
+        catch (Throwable t) { return fallback; }
+    }
+
+    private String greetText() {
+        int h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        String g = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : h < 21 ? "Good evening" : "Good night";
+        return g + ", " + NAME;
+    }
+
+    // ---------- Lifecycle ----------
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         density = getResources().getDisplayMetrics().density;
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        screenH = dm.heightPixels;
         prefs = getSharedPreferences("mk", MODE_PRIVATE);
-
         fLight = font("Poppins-Light.ttf", Typeface.create("sans-serif-light", Typeface.NORMAL));
         fReg = font("Poppins-Regular.ttf", Typeface.DEFAULT);
         fMed = font("Poppins-Medium.ttf", Typeface.DEFAULT_BOLD);
@@ -141,74 +176,120 @@ public class HomeActivity extends Activity {
         shade.setBackground(shadeDrawable);
         root.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.VERTICAL);
-        top.setGravity(Gravity.END);
+        int hostTop = (int) (screenH * 0.36f);
+
+        View panel = new View(this);
+        GradientDrawable pg = new GradientDrawable();
+        float r = dp(32);
+        pg.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        pg.setColor(0x990A0E1A);
+        pg.setStroke(dp(1), 0x22FFFFFF);
+        panel.setBackground(pg);
+        FrameLayout.LayoutParams pnl = new FrameLayout.LayoutParams(-1, -1);
+        pnl.topMargin = hostTop - dp(18);
+        pnl.leftMargin = dp(16);
+        pnl.rightMargin = dp(16);
+        root.addView(panel, pnl);
+
+        LinearLayout hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        greeting = new TextView(this);
+        greeting.setTextColor(0xCCFFFFFF);
+        greeting.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        greeting.setTypeface(fMed);
+        greeting.setShadowLayer(8f, 0f, 2f, 0x99000000);
         clock = new TextView(this);
         clock.setTextColor(Color.WHITE);
-        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 54);
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 64);
         clock.setTypeface(fLight);
-        clock.setShadowLayer(8f, 0f, 2f, 0x99000000);
+        clock.setShadowLayer(10f, 0f, 3f, 0x99000000);
         dateView = new TextView(this);
         dateView.setTextColor(0xDDFFFFFF);
         dateView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         dateView.setTypeface(fReg);
-        dateView.setGravity(Gravity.END);
         dateView.setShadowLayer(6f, 0f, 2f, 0x99000000);
-        top.addView(clock);
-        top.addView(dateView);
-        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP | Gravity.END);
-        tp.topMargin = dp(36);
-        tp.rightMargin = dp(60);
-        root.addView(top, tp);
-
-        greeting = new TextView(this);
-        greeting.setTextColor(Color.WHITE);
-        greeting.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
-        greeting.setTypeface(fMed);
-        greeting.setShadowLayer(8f, 0f, 2f, 0x99000000);
-        FrameLayout.LayoutParams gp = new FrameLayout.LayoutParams(
+        hero.addView(greeting);
+        hero.addView(clock);
+        hero.addView(dateView);
+        FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.START);
-        gp.topMargin = dp(52);
-        gp.leftMargin = dp(60);
-        root.addView(greeting, gp);
+        hp.leftMargin = dp(56);
+        hp.topMargin = dp(28);
+        root.addView(hero, hp);
 
-        View panel = new View(this);
-        GradientDrawable pg = new GradientDrawable();
-        pg.setCornerRadius(dp(30));
-        pg.setColor(0x38000000);
-        pg.setStroke(dp(1), 0x22FFFFFF);
-        panel.setBackground(pg);
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, dp(250), Gravity.BOTTOM);
-        pp.leftMargin = dp(30);
-        pp.rightMargin = dp(30);
-        pp.bottomMargin = dp(24);
-        root.addView(panel, pp);
+        pills = new LinearLayout(this);
+        pills.setOrientation(LinearLayout.HORIZONTAL);
+        addPill("Customise", new Runnable() { @Override public void run() { showCustomise(); } });
+        addPill("Wi-Fi", intentRunner(Settings.ACTION_WIFI_SETTINGS));
+        addPill("Bluetooth", intentRunner(Settings.ACTION_BLUETOOTH_SETTINGS));
+        addPill("Settings", intentRunner(Settings.ACTION_SETTINGS));
+        FrameLayout.LayoutParams pl = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.END);
+        pl.topMargin = dp(34);
+        pl.rightMargin = dp(48);
+        root.addView(pills, pl);
 
-        scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setClipChildren(false);
-        scroll.setClipToPadding(false);
-        scroll.setFillViewport(false);
-        row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setClipChildren(false);
-        row.setPadding(dp(60), dp(30), dp(60), dp(30));
-        scroll.addView(row, new HorizontalScrollView.LayoutParams(
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
-                HorizontalScrollView.LayoutParams.WRAP_CONTENT));
-        FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM);
-        sp.bottomMargin = dp(30);
-        root.addView(scroll, sp);
+        vscroll = new ScrollView(this);
+        vscroll.setVerticalScrollBarEnabled(false);
+        vscroll.setClipChildren(false);
+        vscroll.setClipToPadding(false);
+        vscroll.setPadding(0, 0, 0, dp(40));
+        rowsHost = new LinearLayout(this);
+        rowsHost.setOrientation(LinearLayout.VERTICAL);
+        rowsHost.setClipChildren(false);
+        vscroll.addView(rowsHost, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams vp = new FrameLayout.LayoutParams(-1, -1);
+        vp.topMargin = hostTop;
+        root.addView(vscroll, vp);
 
         setContentView(root);
         hideBars();
+    }
+
+    private Runnable intentRunner(final String action) {
+        return new Runnable() {
+            @Override public void run() {
+                try { startActivity(new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
+                catch (Exception e) { Toast.makeText(HomeActivity.this, "Open nahi hua", Toast.LENGTH_SHORT).show(); }
+            }
+        };
+    }
+
+    private GradientDrawable pillBg(boolean focused) {
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(24));
+        g.setColor(focused ? 0x55FFFFFF : 0x33000000);
+        g.setStroke(dp(focused ? 2 : 1), focused ? accent() : 0x44FFFFFF);
+        return g;
+    }
+
+    private void addPill(String text, final Runnable action) {
+        final TextView p = new TextView(this);
+        p.setText(text);
+        p.setTextColor(Color.WHITE);
+        p.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        p.setTypeface(fMed);
+        p.setPadding(dp(20), dp(10), dp(20), dp(10));
+        p.setBackground(pillBg(false));
+        p.setFocusable(true);
+        p.setClickable(true);
+        p.setTag("__pill");
+        p.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { action.run(); }
+        });
+        p.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean has) {
+                v.setBackground(pillBg(has));
+                v.animate().scaleX(has ? 1.07f : 1f).scaleY(has ? 1.07f : 1f).setDuration(120);
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(12);
+        pills.addView(p, lp);
     }
 
     private void hideBars() {
@@ -232,7 +313,7 @@ public class HomeActivity extends Activity {
         }
         greeting.setText(greetText());
         animateNext = true;
-        buildRow();
+        buildAll();
         loadWalls();
         handler.removeCallbacks(clockRun);
         handler.post(clockRun);
@@ -252,12 +333,12 @@ public class HomeActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        scroll.smoothScrollTo(0, 0);
-        if (row.getChildCount() > 0) row.getChildAt(0).requestFocus();
+        vscroll.smoothScrollTo(0, 0);
+        if (firstTile != null) firstTile.requestFocus();
     }
 
     @Override
-    public void onBackPressed() { /* Home par back kuch nahi karega */ }
+    public void onBackPressed() { }
 
     // ---------- Wallpapers ----------
 
@@ -270,9 +351,7 @@ public class HomeActivity extends Activity {
             Arrays.sort(fs);
             for (File f : fs) {
                 String n = f.getName().toLowerCase(Locale.ROOT);
-                if (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")) {
-                    walls.add(f);
-                }
+                if (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")) walls.add(f);
             }
         }
         handler.removeCallbacks(wallRun);
@@ -285,7 +364,7 @@ public class HomeActivity extends Activity {
         }
         if (wallIdx >= walls.size()) wallIdx = 0;
         showWall();
-        if (walls.size() > 1) handler.postDelayed(wallRun, WALL_INTERVAL_MS);
+        if (walls.size() > 1 && wallMs() > 0) handler.postDelayed(wallRun, wallMs());
     }
 
     private void showWall() {
@@ -298,10 +377,11 @@ public class HomeActivity extends Activity {
         in.setScaleY(1f);
         int zi = (in == bgA) ? 0 : 1;
         if (zooms[zi] != null) zooms[zi].cancel();
+        long zd = wallMs() > 0 ? wallMs() + 2000L : 120000L;
         zooms[zi] = ObjectAnimator.ofPropertyValuesHolder(in,
                 PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.08f),
                 PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.08f));
-        zooms[zi].setDuration(WALL_INTERVAL_MS + 2000L);
+        zooms[zi].setDuration(zd);
         zooms[zi].setInterpolator(new LinearInterpolator());
         zooms[zi].start();
         in.animate().alpha(1f).setDuration(1200);
@@ -331,10 +411,24 @@ public class HomeActivity extends Activity {
         }
     }
 
-    // ---------- Apps row ----------
+    // ---------- Apps ----------
+
+    private String autoCategory(String pkg, ResolveInfo ri) {
+        String p = pkg.toLowerCase(Locale.ROOT);
+        try {
+            ApplicationInfo ai = ri.activityInfo.applicationInfo;
+            boolean game = (ai.flags & ApplicationInfo.FLAG_IS_GAME) != 0;
+            if (Build.VERSION.SDK_INT >= 26 && ai.category == ApplicationInfo.CATEGORY_GAME) game = true;
+            if (game) return "Games";
+        } catch (Throwable t) { }
+        for (String k : STREAM_KEYS) if (p.contains(k)) return "Streaming";
+        for (String k : TOOL_KEYS) if (p.contains(k)) return "Tools";
+        return "Apps";
+    }
 
     private List<AppItem> loadApps() {
         PackageManager pm = getPackageManager();
+        Set<String> hidden = getSet("hidden");
         Map<String, AppItem> map = new LinkedHashMap<String, AppItem>();
         String[] cats = {Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER};
         for (String cat : cats) {
@@ -342,64 +436,93 @@ public class HomeActivity extends Activity {
             List<ResolveInfo> list = pm.queryIntentActivities(q, 0);
             for (ResolveInfo ri : list) {
                 String pkg = ri.activityInfo.packageName;
-                if (pkg.equals(getPackageName()) || map.containsKey(pkg)) continue;
+                if (pkg.equals(getPackageName()) || map.containsKey(pkg) || hidden.contains(pkg)) continue;
                 AppItem a = new AppItem();
                 a.pkg = pkg;
                 a.ri = ri;
                 a.label = String.valueOf(ri.loadLabel(pm));
+                String over = prefs.getString("cat_" + pkg, null);
+                a.cat = over != null ? over : autoCategory(pkg, ri);
                 a.launch = new Intent(Intent.ACTION_MAIN).addCategory(cat)
                         .setClassName(pkg, ri.activityInfo.name)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
                 map.put(pkg, a);
             }
         }
-        final Set<String> pins = new HashSet<String>(prefs.getStringSet("pins", new HashSet<String>()));
         List<AppItem> items = new ArrayList<AppItem>(map.values());
         Collections.sort(items, new Comparator<AppItem>() {
-            @Override public int compare(AppItem x, AppItem y) {
-                boolean px = pins.contains(x.pkg), py = pins.contains(y.pkg);
-                if (px != py) return px ? -1 : 1;
-                return x.label.compareToIgnoreCase(y.label);
-            }
+            @Override public int compare(AppItem x, AppItem y) { return x.label.compareToIgnoreCase(y.label); }
         });
         return items;
     }
 
-    private void buildRow() {
-        String focusPkg = null;
-        View fc = row.getFocusedChild();
-        if (fc != null && fc.getTag() != null) focusPkg = String.valueOf(fc.getTag());
-
-        row.removeAllViews();
-        Set<String> pins = prefs.getStringSet("pins", new HashSet<String>());
-        View toFocus = null;
+    private void buildAll() {
+        View cf = getCurrentFocus();
+        String fp = (cf != null && cf.getTag() instanceof String) ? (String) cf.getTag() : null;
+        rowsHost.removeAllViews();
+        firstTile = null;
+        Set<String> pins = getSet("pins");
+        Map<String, List<AppItem>> g = new LinkedHashMap<String, List<AppItem>>();
+        for (String r : ROWS) g.put(r, new ArrayList<AppItem>());
         for (AppItem a : loadApps()) {
-            View t = makeTile(a, pins.contains(a.pkg));
-            row.addView(t, tileParams());
-            if (a.pkg.equals(focusPkg)) toFocus = t;
+            String key = pins.contains(a.pkg) ? "Favorites" : a.cat;
+            List<AppItem> l = g.get(key);
+            if (l == null) l = g.get("Apps");
+            l.add(a);
         }
-        row.addView(makeSettingsTile(), tileParams());
-        if (animateNext) {
-            animateNext = false;
-            for (int k = 0; k < row.getChildCount(); k++) {
-                View c = row.getChildAt(k);
-                c.setAlpha(0f);
-                c.setTranslationY(dp(36));
-                c.animate().alpha(1f).translationY(0f).setStartDelay(Math.min(k, 8) * 45L)
-                        .setDuration(380).setInterpolator(new DecelerateInterpolator());
+        View toFocus = null;
+        int si = 0;
+        for (String r : ROWS) {
+            List<AppItem> l = g.get(r);
+            if (l.isEmpty()) continue;
+            LinearLayout sec = new LinearLayout(this);
+            sec.setOrientation(LinearLayout.VERTICAL);
+            sec.setClipChildren(false);
+            TextView title = new TextView(this);
+            title.setText(r);
+            title.setTextColor(Color.WHITE);
+            title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+            title.setTypeface(fSemi);
+            title.setPadding(dp(56), dp(10), 0, 0);
+            sec.addView(title);
+            HorizontalScrollView hs = new HorizontalScrollView(this);
+            hs.setHorizontalScrollBarEnabled(false);
+            hs.setClipChildren(false);
+            hs.setClipToPadding(false);
+            LinearLayout tr = new LinearLayout(this);
+            tr.setOrientation(LinearLayout.HORIZONTAL);
+            tr.setClipChildren(false);
+            tr.setPadding(dp(56), dp(16), dp(56), dp(16));
+            for (AppItem a : l) {
+                View t = makeTile(a);
+                tr.addView(t, tileParams());
+                if (a.pkg.equals(fp)) toFocus = t;
+                if (firstTile == null) firstTile = t;
             }
+            hs.addView(tr, new HorizontalScrollView.LayoutParams(
+                    HorizontalScrollView.LayoutParams.WRAP_CONTENT, HorizontalScrollView.LayoutParams.WRAP_CONTENT));
+            sec.addView(hs, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            rowsHost.addView(sec, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            if (animateNext) {
+                sec.setAlpha(0f);
+                sec.setTranslationY(dp(40));
+                sec.animate().alpha(1f).translationY(0f).setStartDelay(si * 90L)
+                        .setDuration(420).setInterpolator(new DecelerateInterpolator());
+            }
+            si++;
         }
-        if (toFocus == null && row.getChildCount() > 0) toFocus = row.getChildAt(0);
+        animateNext = false;
+        if (toFocus == null) toFocus = firstTile;
         final View tf = toFocus;
-        if (tf != null) {
-            tf.post(new Runnable() { @Override public void run() { tf.requestFocus(); } });
-        }
+        if (tf != null) tf.post(new Runnable() { @Override public void run() { tf.requestFocus(); } });
     }
 
     private LinearLayout.LayoutParams tileParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(240),
-                LinearLayout.LayoutParams.WRAP_CONTENT);
-        p.rightMargin = dp(24);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                dp(SIZE_W[prefs.getInt("size", 1)]), LinearLayout.LayoutParams.WRAP_CONTENT);
+        p.rightMargin = dp(22);
         return p;
     }
 
@@ -414,52 +537,17 @@ public class HomeActivity extends Activity {
         GradientDrawable g = new GradientDrawable();
         g.setCornerRadius(dp(22));
         g.setColor(Color.TRANSPARENT);
-        g.setStroke(dp(focused ? 3 : 1), focused ? 0xFFFFFFFF : 0x44FFFFFF);
+        g.setStroke(dp(focused ? 3 : 1), focused ? accent() : 0x44FFFFFF);
         return g;
     }
 
-    private View buildTile(String tag, FrameLayout card, final TextView label) {
-        final LinearLayout tile = new LinearLayout(this);
-        tile.setOrientation(LinearLayout.VERTICAL);
-        tile.setFocusable(true);
-        tile.setClickable(true);
-        tile.setClipChildren(false);
-        tile.setTag(tag);
-        tile.addView(card, new LinearLayout.LayoutParams(dp(240), dp(135)));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(10);
-        label.setGravity(Gravity.CENTER);
-        label.setSingleLine(true);
-        label.setEllipsize(TextUtils.TruncateAt.END);
-        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        label.setTypeface(fMed);
-        label.setTextColor(0xAAFFFFFF);
-        label.setShadowLayer(6f, 0f, 2f, 0x99000000);
-        tile.addView(label, lp);
-        final FrameLayout c = card;
-        tile.setOnFocusChangeListener(new View.OnFocusChangeListener() {
-            @Override public void onFocusChange(View v, boolean has) {
-                c.setForeground(ring(has));
-                label.setTextColor(has ? Color.WHITE : 0xAAFFFFFF);
-                v.animate().scaleX(has ? 1.14f : 1f).scaleY(has ? 1.14f : 1f)
-                        .translationZ(has ? dp(12) : 0f).setDuration(150);
-            }
-        });
-        return tile;
-    }
-
-    private FrameLayout newCard() {
-        FrameLayout card = new FrameLayout(this);
+    private View makeTile(final AppItem a) {
+        int sz = prefs.getInt("size", 1);
+        PackageManager pm = getPackageManager();
+        final FrameLayout card = new FrameLayout(this);
         card.setBackground(fill());
         card.setForeground(ring(false));
         card.setClipToOutline(true);
-        return card;
-    }
-
-    private View makeTile(final AppItem a, final boolean pinned) {
-        PackageManager pm = getPackageManager();
-        FrameLayout card = newCard();
         Drawable banner = null;
         try {
             banner = a.ri.activityInfo.loadBanner(pm);
@@ -473,11 +561,40 @@ public class HomeActivity extends Activity {
         } else {
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
             iv.setImageDrawable(a.ri.loadIcon(pm));
-            card.addView(iv, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+            int is = dp(SIZE_H[sz] * 55 / 100);
+            card.addView(iv, new FrameLayout.LayoutParams(is, is, Gravity.CENTER));
         }
-        TextView label = new TextView(this);
-        label.setText((pinned ? "\u2605 " : "") + a.label);
-        View tile = buildTile(a.pkg, card, label);
+
+        final TextView label = new TextView(this);
+        label.setText(a.label);
+        label.setGravity(Gravity.CENTER);
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        label.setTypeface(fMed);
+        label.setTextColor(0xAAFFFFFF);
+        label.setShadowLayer(6f, 0f, 2f, 0x99000000);
+
+        final LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setFocusable(true);
+        tile.setClickable(true);
+        tile.setClipChildren(false);
+        tile.setTag(a.pkg);
+        tile.addView(card, new LinearLayout.LayoutParams(dp(SIZE_W[sz]), dp(SIZE_H[sz])));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        tile.addView(label, lp);
+
+        tile.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean has) {
+                card.setForeground(ring(has));
+                label.setTextColor(has ? Color.WHITE : 0xAAFFFFFF);
+                v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f)
+                        .translationZ(has ? dp(12) : 0f).setDuration(150);
+            }
+        });
         tile.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try { startActivity(a.launch); }
@@ -485,37 +602,104 @@ public class HomeActivity extends Activity {
             }
         });
         tile.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override public boolean onLongClick(View v) {
-                Set<String> p = new HashSet<String>(prefs.getStringSet("pins", new HashSet<String>()));
-                if (p.contains(a.pkg)) p.remove(a.pkg); else p.add(a.pkg);
-                prefs.edit().putStringSet("pins", p).apply();
-                Toast.makeText(HomeActivity.this, p.contains(a.pkg) ? "Pinned" : "Unpinned", Toast.LENGTH_SHORT).show();
-                buildRow();
-                return true;
-            }
+            @Override public boolean onLongClick(View v) { showAppMenu(a); return true; }
         });
         return tile;
     }
 
-    private View makeSettingsTile() {
-        FrameLayout card = newCard();
-        TextView t = new TextView(this);
-        t.setText("Settings");
-        t.setTextColor(Color.WHITE);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
-        t.setTypeface(fLight);
-        card.addView(t, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
-        TextView label = new TextView(this);
-        label.setText("Settings");
-        View tile = buildTile("__settings", card, label);
-        tile.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-                } catch (Exception e) { }
+    // ---------- Dialogs ----------
+
+    private AlertDialog.Builder dlg(String title) {
+        return new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert).setTitle(title);
+    }
+
+    private void menu(String title, String[] opts, final IntCb cb) {
+        dlg(title).setItems(opts, new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface d, int w) { cb.on(w); }
+        }).show();
+    }
+
+    private void choose(String title, String[] opts, int cur, final IntCb cb) {
+        dlg(title).setSingleChoiceItems(opts, cur, new android.content.DialogInterface.OnClickListener() {
+            @Override public void onClick(android.content.DialogInterface d, int w) { d.dismiss(); cb.on(w); }
+        }).show();
+    }
+
+    private void showAppMenu(final AppItem a) {
+        final boolean pinned = getSet("pins").contains(a.pkg);
+        String[] opts = {pinned ? "Remove from Favorites" : "Add to Favorites",
+                "Move to Streaming", "Move to Apps", "Move to Games", "Move to Tools",
+                "Hide from home", "App info"};
+        menu(a.label, opts, new IntCb() {
+            @Override public void on(int i) {
+                if (i == 0) {
+                    Set<String> p = getSet("pins");
+                    if (pinned) p.remove(a.pkg); else p.add(a.pkg);
+                    prefs.edit().putStringSet("pins", p).apply();
+                } else if (i >= 1 && i <= 4) {
+                    prefs.edit().putString("cat_" + a.pkg, MOVE_TO[i - 1]).apply();
+                    Set<String> p = getSet("pins");
+                    if (p.remove(a.pkg)) prefs.edit().putStringSet("pins", p).apply();
+                } else if (i == 5) {
+                    Set<String> h = getSet("hidden");
+                    h.add(a.pkg);
+                    prefs.edit().putStringSet("hidden", h).apply();
+                    Toast.makeText(HomeActivity.this, "Hidden. Customise se wapas laa sakte hain", Toast.LENGTH_LONG).show();
+                } else if (i == 6) {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:" + a.pkg)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                    } catch (Exception e) { }
+                    return;
+                }
+                buildAll();
             }
         });
-        return tile;
+    }
+
+    private void showCustomise() {
+        int hiddenN = getSet("hidden").size();
+        String[] opts = {
+                "Accent colour: " + ACCENT_NAMES[prefs.getInt("accent", 0)],
+                "Tile size: " + SIZE_NAMES[prefs.getInt("size", 1)],
+                "Clock: " + (prefs.getBoolean("clock24", false) ? "24-hour" : "12-hour"),
+                "Wallpaper change: " + WALL_NAMES[prefs.getInt("wallmin", 2)],
+                "Unhide all apps (" + hiddenN + " hidden)",
+                "Reset layout and favorites"};
+        menu("Customise", opts, new IntCb() {
+            @Override public void on(int i) {
+                if (i == 0) {
+                    choose("Accent colour", ACCENT_NAMES, prefs.getInt("accent", 0), new IntCb() {
+                        @Override public void on(int k) { prefs.edit().putInt("accent", k).apply(); applyAll(); }
+                    });
+                } else if (i == 1) {
+                    choose("Tile size", SIZE_NAMES, prefs.getInt("size", 1), new IntCb() {
+                        @Override public void on(int k) { prefs.edit().putInt("size", k).apply(); applyAll(); }
+                    });
+                } else if (i == 2) {
+                    choose("Clock", new String[]{"12-hour", "24-hour"}, prefs.getBoolean("clock24", false) ? 1 : 0, new IntCb() {
+                        @Override public void on(int k) { prefs.edit().putBoolean("clock24", k == 1).apply(); applyAll(); }
+                    });
+                } else if (i == 3) {
+                    choose("Wallpaper change", WALL_NAMES, prefs.getInt("wallmin", 2), new IntCb() {
+                        @Override public void on(int k) { prefs.edit().putInt("wallmin", k).apply(); applyAll(); }
+                    });
+                } else if (i == 4) {
+                    prefs.edit().putStringSet("hidden", new HashSet<String>()).apply();
+                    applyAll();
+                } else if (i == 5) {
+                    prefs.edit().clear().apply();
+                    applyAll();
+                }
+            }
+        });
+    }
+
+    private void applyAll() {
+        for (int k = 0; k < pills.getChildCount(); k++) pills.getChildAt(k).setBackground(pillBg(false));
+        handler.removeCallbacks(clockRun);
+        handler.post(clockRun);
+        loadWalls();
+        buildAll();
     }
 }
